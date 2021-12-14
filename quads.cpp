@@ -7,7 +7,10 @@
 #include <limits.h>
 #include <functional>
 
-#define NUM (1 << 22)
+#ifndef BITS
+#define BITS 24
+#endif
+#define NUM (1 << BITS)
 
 #if defined(__ARM_ARCH_5__) \
 	|| defined(__ARM_ARCH_6__) \
@@ -34,13 +37,10 @@ static inline double get_freq(void) {
 #if defined(__x86_64__)
 	uint64_t time_a = get_timestamp();
 	usleep(1000000);
-	//sleep(1);
-	//for ( volatile int i = 0; i < 10000000; i++ );
 	uint64_t time_b = get_timestamp();
 	uint64_t delta = time_b - time_a;
 
 	printf( "total real clocks: %lu\n", delta );
-	//printf( "timestamp a: %lu, timestamp b: %lu\n", time_a, time_b );
 
 	double ghertz = delta / 1000000000.0;
 
@@ -81,7 +81,10 @@ static inline float ssesqrtf(float n) {
 	// on only a single value
 	return __builtin_ia32_sqrtps(temp)[0];
 #elif defined(IS_ARM)
-	v2sf temp = {n}; 
+	float asdf[2] = {n, n};
+	v2sf temp = vld1_f32(asdf);
+
+	//v2sf temp = {n}; 
 	// use reciprocal sqrt approximation, sqrt is on 64 bit arm only it seems
 	return 1.f/vrsqrte_f32(temp)[0];
 #else
@@ -96,6 +99,85 @@ void doPlainAoS(quadratic *quads, float *results) {
 		results[i] = (-q.b + ssesqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
 	}
 }
+
+#if (defined(__i386__) || defined(__x86_64__)) && defined(USESSE)
+void doAoS_sse(quadratic *quads, float *results) {
+	for (int i = 0; i < NUM; i += 4) {
+		quadratic *q = quads + i;
+
+		v4sf a = { q[0].a, q[1].a, q[2].a, q[3].a, };
+		v4sf b = { q[0].b, q[1].b, q[2].b, q[3].b, };
+		v4sf c = { q[0].c, q[1].c, q[2].c, q[3].c, };
+
+
+		//results[i] = (-q.b + sqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
+		//results[i] = (-q.b + ssesqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
+		//results[i] = (-q.b + ssesqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
+
+		v4sf temp = b*b - 4*a*c;
+		v4sf sqr  = __builtin_ia32_sqrtps(temp);
+		v4sf result = (-b*sqr) / 2*a;
+
+		__builtin_ia32_storeups(results+i, result);
+	}
+}
+#endif
+
+#if defined(IS_ARM) && defined(USENEON)
+void doAoS_neon2(quadratic *quads, float *results) {
+	for (int i = 0; i < NUM; i += 2) {
+		quadratic *q = quads + i;
+
+		v2sf a = { q[0].a, q[1].a, };
+		v2sf b = { q[0].b, q[1].b, };
+		v2sf c = { q[0].c, q[1].c, };
+
+		v2sf temp = b*b - 4*a*c;
+		v2sf sqr  = 1.f/vrsqrte_f32(temp);
+		v2sf result = (-b*sqr) / 2*a;
+
+		vst1_f32(results + i, result);
+	}
+}
+
+void doAoS_neon4(quadratic *quads, float *results) {
+	for (int i = 0; i < NUM; i += 4) {
+		quadratic *q = quads + i;
+
+		v4sf a = { q[0].a, q[1].a, q[2].a, q[3].a, };
+		v4sf b = { q[0].b, q[1].b, q[2].b, q[3].b, };
+		v4sf c = { q[0].c, q[1].c, q[2].c, q[3].c, };
+
+		v4sf temp = b*b - 4*a*c;
+		v4sf sqr  = 1.f/vrsqrteq_f32(temp);
+		v4sf result = (-b*sqr) / 2*a;
+
+		vst1q_f32(results + i, result);
+	}
+}
+#endif
+
+#if defined(__x86_64__) && defined(USEAVX)
+void doAoS_avx(quadratic *quads, float *results) {
+	for (int i = 0; i < NUM; i += 8) {
+		quadratic *q = quads + i;
+
+		v8sf a = { q[0].a, q[1].a, q[2].a, q[3].a, q[4].a, q[5].a, q[6].a, q[7].a, };
+		v8sf b = { q[0].b, q[1].b, q[2].b, q[3].b, q[4].b, q[5].b, q[6].b, q[7].b, };
+		v8sf c = { q[0].c, q[1].c, q[2].c, q[3].c, q[4].c, q[5].c, q[6].c, q[7].c, };
+
+		//results[i] = (-q.b + sqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
+		//results[i] = (-q.b + ssesqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
+		//results[i] = (-q.b + ssesqrtf(q.b*q.b - 4*q.a*q.c)) / (2*q.a);
+
+		v8sf temp = b*b - 4*a*c;
+		v8sf sqr  = __builtin_ia32_sqrtps256(temp);
+		v8sf result = (-b*sqr) / 2*a;
+
+		__builtin_ia32_storeups256(results+i, result);
+	}
+}
+#endif
 
 //float *doPlainSoA(quadraticSoA& quads) __attribute__((optimize("-fnotree-loop-vectorize -fnotree-vectorize")));
 
@@ -150,11 +232,12 @@ void doAoSoA_sse(quadraticAoSoA *quads, float *results) {
 #if defined(__x86_64__) && defined(USEAVX)
 void doSoA_avx(quadraticSoA *quads, float *results) {
 	quadraticSoA *q = quads;
+	float *da = q->a, *db = q->b, *dc = q->c;
 
 	for (int n = 0; n < NUM; n += 8) {
-		v8sf a = __builtin_ia32_loadups256(q->a + n);
-		v8sf b = __builtin_ia32_loadups256(q->b + n);
-		v8sf c = __builtin_ia32_loadups256(q->c + n);
+		v8sf a = __builtin_ia32_loadups256(da + n);
+		v8sf b = __builtin_ia32_loadups256(db + n);
+		v8sf c = __builtin_ia32_loadups256(dc + n);
 
 		v8sf temp = b*b - 4*a*c;
 		v8sf sqr  = __builtin_ia32_sqrtps256(temp);
@@ -212,7 +295,6 @@ void doAoSoA_neon4(quadraticAoSoA *quads, float *results) {
 			v4sf result = (-b*sqr) / 2*a;
 
 			vst1q_f32(results+n + k, result);
-			//__builtin_ia32_storeups(results+n + k, result);
 		}
 	}
 }
@@ -265,8 +347,6 @@ int main(int argc, char *argv[]) {
 	quadraticSoA *soainputs = new quadraticSoA;
 	quadraticAoSoA *aosoainputs = new quadraticAoSoA[NUM/8];
 	float *results = new float[NUM];
-	//static quadratic inputs[NUM];
-	//static quadraticSoA soainputs;
 
 	printf("finding roots of %u quadratics (%lu MiB of data)\n", NUM, (sizeof(float[3]) * NUM)/1024/1024);
 
@@ -274,7 +354,6 @@ int main(int argc, char *argv[]) {
 	double freq = get_freq();
 	double msfreq = freq / 1000;
 	printf("Time resolution: 1/%g\n", freq);
-	//double freq = get_freq();
 
 	printf("Generating data...\n");
 	for (int i = 0; i < NUM; i++) {
@@ -315,18 +394,22 @@ int main(int argc, char *argv[]) {
 	doBenchmark("SoA (no simd)", [&]() { doPlainSoA(soainputs, results); });
 
 #if (defined(__i386__) || defined(__x86_64__)) && defined(USESSE)
+	doBenchmark(  "AoS (sse)", [&]() {   doAoS_sse(inputs, results); });
 	doBenchmark(  "SoA (sse)", [&]() {   doSoA_sse(soainputs, results); });
 	doBenchmark("AoSoA (sse)", [&]() { doAoSoA_sse(aosoainputs, results); });
 #endif
 
 #if defined(__x86_64__) && defined(USEAVX)
+	doBenchmark(  "AoS (avx)", [&]() {   doAoS_avx(inputs, results); });
 	doBenchmark(  "SoA (avx)", [&]() {   doSoA_avx(soainputs, results); });
 	doBenchmark("AoSoA (avx)", [&]() { doAoSoA_avx(aosoainputs, results); });
 #endif
 
 #if defined(IS_ARM) && defined(USENEON)
+	doBenchmark(  "AoS (neon x2)", [&]() {   doAoS_neon2(inputs, results); });
 	doBenchmark(  "SoA (neon x2)", [&]() {   doSoA_neon2(soainputs, results); });
 	doBenchmark("AoSoA (neon x2)", [&]() { doAoSoA_neon2(aosoainputs, results); });
+	doBenchmark(  "AoS (neon x4)", [&]() {   doAoS_neon4(inputs, results); });
 	doBenchmark(  "SoA (neon x4)", [&]() {   doSoA_neon4(soainputs, results); });
 	doBenchmark("AoSoA (neon x4)", [&]() { doAoSoA_neon4(aosoainputs, results); });
 #endif
